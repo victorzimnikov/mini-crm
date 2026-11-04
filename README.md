@@ -24,7 +24,7 @@ VITE_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLIC_PUBLISHABLE_OR_ANON_KEY
 ## Подготовка Supabase
 
 1. Создайте проект на [supabase.com](https://supabase.com).
-2. В SQL Editor выполните **все** файлы из `supabase/migrations` в порядке имени: сначала `202611040001_initial.sql`, затем `202611040002_preserve_task_history.sql`. Каждая миграция применяется один раз. Для рабочего процесса через Supabase CLI можно использовать `supabase link` и `supabase db push`.
+2. Примените миграции через Supabase CLI: один раз выполните `npx supabase init` для создания локального `supabase/config.toml`, затем `npx supabase login`, `npx supabase link YOUR_PROJECT_REF`, затем `npx supabase db push --remote`. CLI выполняет файлы из `supabase/migrations` по порядку и записывает их в журнал миграций. Если выполняете SQL вручную через SQL Editor, после успешного выполнения каждой миграции отметьте её через `npx supabase migration repair VERSION --status applied --remote` в подключённом проекте: сам SQL Editor журнал не обновляет. Не запускайте миграции повторно в уже настроенной базе.
 3. В Authentication → Sign In / Providers отключите **Allow new users to sign up**. В разных версиях панели этот переключатель может находиться в настройках email-провайдера. Отсутствие формы регистрации во фронтенде само по себе не отключает регистрацию через Auth API.
 4. В Authentication → Users → Add user создайте трёх пользователей с email и собственными паролями; включите Auto Confirm User:
    - `manager@example.com`
@@ -38,7 +38,29 @@ VITE_SUPABASE_PUBLISHABLE_KEY=YOUR_PUBLIC_PUBLISHABLE_OR_ANON_KEY
 
 ## Обновление существующей базы
 
-Если начальная миграция уже применена, выполните **только** `supabase/migrations/202611040002_preserve_task_history.sql` в SQL Editor (или `supabase db push` для проекта, подключённого через CLI). Сначала обновите базу, затем опубликуйте новую сборку фронтенда. Миграция сохраняет существующие задачи и историю, добавляет архив и закрывает физическое удаление через пользовательский API. Ранее удалённую историю она восстановить не может.
+В Supabase CLI 3.x команды базы без `--remote` обращаются к локальному PostgreSQL (`127.0.0.1:54322`). Для облачного проекта явно указывайте `--remote`; одного `link` недостаточно. [Выбор локального или облачного проекта](https://supabase.com/docs/guides/local-development/local-and-hosted-projects).
+
+Если начальная миграция уже применена и записана в журнале, выполните `npx supabase db push --remote`: будет применена только `202611040002_preserve_task_history.sql`. Сначала обновите базу, затем опубликуйте новую сборку фронтенда. Миграция сохраняет существующие задачи и историю, добавляет архив и закрывает физическое удаление через пользовательский API. Ранее удалённую историю она восстановить не может.
+
+### Ошибка `type "user_role" already exists` в Supabase Preview
+
+Такая ошибка при выполнении `202611040001_initial.sql` означает, что тип уже существует в целевой базе. Если начальную миграцию ранее выполнили через SQL Editor, её SQL уже применён, но в журнале `supabase_migrations.schema_migrations` может отсутствовать запись. Интеграция GitHub тогда пытается выполнить её повторно.
+
+Для базы, в которой **вся начальная миграция уже успешно выполнена**, синхронизируйте журнал:
+
+```sh
+# Один раз, если supabase/config.toml ещё нет:
+npx supabase init
+npx supabase login
+npx supabase link YOUR_PROJECT_REF
+npx supabase migration list --remote
+npx supabase migration repair 202611040001 --status applied --remote
+npx supabase db push --dry-run --remote
+```
+
+Убедитесь, что dry-run предлагает только ещё не выполненную миграцию архива `202611040002_preserve_task_history.sql`. Затем выполните `npx supabase db push --remote` и повторите GitHub-проверку Supabase Preview. Команда `migration repair` меняет только журнал; таблицы, данные и историю задач она не меняет.
+
+Если миграция архива тоже уже успешно выполнена вручную, отметьте её отдельно командой `npx supabase migration repair 202611040002 --status applied --remote`; повторно выполнять её SQL нельзя. Если начальная схема создана частично или отличается от миграции, сначала проверьте различия — одного существующего типа недостаточно для отметки всей миграции. Используйте проект или ветку из ссылки Details упавшей проверки. Не удаляйте существующие типы/таблицы и не выполняйте сброс базы для устранения этой ошибки.
 
 ## Проверка и сборка
 
