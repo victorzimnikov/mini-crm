@@ -46,7 +46,7 @@ export function TaskForm({ task, objectId, onSaved, onCancel }: {
   const [error, setError] = useState('')
   const options = useResource(async () => {
     const [objects, people] = await Promise.all([
-      db().from('objects').select('*').order('name'),
+      db().from('objects').select('*').is('archived_at', null).order('name'),
       db().from('profiles').select('*').eq('role', 'executor').order('display_name'),
     ])
     if (objects.error) throw objects.error

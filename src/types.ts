@@ -1,7 +1,7 @@
 export type Role = 'manager' | 'executor'
 export type Status = 'new' | 'in_progress' | 'review' | 'accepted' | 'revision'
 export type Profile = { id: string; display_name: string; role: Role }
-export type ConstructionObject = { id: string; name: string; address: string }
+export type ConstructionObject = { id: string; name: string; address: string; archived_at: string | null }
 export type Task = {
   id: string
   title: string
@@ -11,6 +11,7 @@ export type Task = {
   status: Status
   author_id: string
   created_at: string
+  archived_at: string | null
 }
 export type HistoryEntry = {
   id: string
@@ -32,13 +33,15 @@ export type Database = {
   public: {
     Tables: {
       profiles: Table<Profile, never, never>
-      objects: Table<ConstructionObject, Omit<ConstructionObject, 'id'>, Partial<Omit<ConstructionObject, 'id'>>>
+      objects: Table<ConstructionObject, Pick<ConstructionObject, 'name' | 'address'>, Partial<Pick<ConstructionObject, 'name' | 'address'>>>
       tasks: Table<Task, Pick<Task, 'title' | 'description' | 'object_id' | 'assignee_id'>,
         Partial<Pick<Task, 'title' | 'description' | 'object_id' | 'assignee_id'>>>
       task_status_history: Table<HistoryEntry, never, never>
     }
     Views: Record<string, never>
     Functions: {
+      archive_task: { Args: { p_task_id: string }; Returns: undefined }
+      archive_object: { Args: { p_object_id: string }; Returns: undefined }
       change_task_status: {
         Args: { p_task_id: string; p_next_status: Status; p_comment?: string | null }
         Returns: undefined

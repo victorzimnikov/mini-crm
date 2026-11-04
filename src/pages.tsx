@@ -39,7 +39,7 @@ export function BrandIcon() {
 
 export function SetupPage() {
   return <main className="setup-page"><section className="panel setup-panel"><div className="brand"><BrandIcon /> ОБЪЕКТЫ И ЗАДАЧИ</div><h1>Подключите Supabase</h1><p>Для работы приложения нужен проект Supabase с настроенной базой и тестовыми пользователями.</p><ol>
-    <li>Создайте проект и выполните SQL-миграцию из папки <code>supabase/migrations</code>.</li>
+    <li>Создайте проект и выполните все SQL-миграции по порядку из папки <code>supabase/migrations</code>.</li>
     <li>Создайте пользователей, назначьте роли и отключите открытую регистрацию.</li>
     <li>Скопируйте <code>.env.example</code> в <code>.env.local</code> и укажите URL проекта и публичный ключ.</li>
     <li>Перезапустите приложение.</li>
@@ -50,28 +50,30 @@ export function ObjectsPage() {
   const { profile } = useAuth()
   const navigate = useNavigate()
   const [creating, setCreating] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
   const resource = useResource(async () => {
     const [objects, tasks] = await Promise.all([
-      db().from('objects').select('*').order('name'),
-      db().from('tasks').select('*'),
+      (showArchived ? db().from('objects').select('*').not('archived_at', 'is', null) : db().from('objects').select('*').is('archived_at', null)).order('name'),
+      showArchived ? db().from('tasks').select('*').not('archived_at', 'is', null) : db().from('tasks').select('*').is('archived_at', null),
     ])
     if (objects.error) throw objects.error
     if (tasks.error) throw tasks.error
     return { objects: objects.data, tasks: tasks.data }
-  })
+  }, [showArchived])
   return <>
     <PageHeading eyebrow="ОБЪЕКТЫ КОМПАНИИ" title="Объекты" description={profile?.role === 'manager' ? 'Стройки и задачи вашей команды.' : 'Объекты, на которых вам назначены задачи.'}
       action={profile?.role === 'manager' && !creating && <button onClick={() => setCreating(true)}>+ Добавить объект</button>} />
+    {profile?.role === 'manager' && <button className="secondary" aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)}>{showArchived ? 'Показать активные объекты' : 'Показать архив объектов'}</button>}
     {creating && <ObjectForm onCancel={() => setCreating(false)} onSaved={id => navigate(`/objects/${id}`)} />}
     {resource.loading ? <Loading /> : resource.error || !resource.data ? <LoadError message={resource.error} retry={resource.reload} /> : <>
-      <div className="section-label">ДОСТУПНЫЕ ОБЪЕКТЫ <span>{resource.data.objects.length}</span></div>
-      {!resource.data.objects.length ? <section className="panel"><EmptyState title="Объектов пока нет">{profile?.role === 'manager' ? 'Добавьте первый объект, чтобы поставить задачи команде.' : 'Объекты появятся, когда вам назначат задачи.'}</EmptyState></section> :
+      <div className="section-label">{showArchived ? 'АРХИВ ОБЪЕКТОВ' : 'ДОСТУПНЫЕ ОБЪЕКТЫ'} <span>{resource.data.objects.length}</span></div>
+      {!resource.data.objects.length ? <section className="panel"><EmptyState title="Объектов пока нет">{showArchived ? 'Архивных объектов пока нет.' : profile?.role === 'manager' ? 'Добавьте первый объект, чтобы поставить задачи команде.' : 'Объекты появятся, когда вам назначат задачи.'}</EmptyState></section> :
         <div className="object-grid">{resource.data.objects.map(object => {
           const tasks = resource.data!.tasks.filter(t => t.object_id === object.id)
           const accepted = tasks.filter(t => t.status === 'accepted').length
           return <Link to={`/objects/${object.id}`} className="object-card" key={object.id}>
             <div className="object-card-top"><span className="building-mark" aria-hidden="true">▤</span><span className="row-arrow" aria-hidden="true">↗</span></div>
-            <h2>{object.name}</h2><p className="object-address">{object.address}</p>
+            <h2>{object.name}</h2>{object.archived_at && <span className="muted">В архиве</span>}<p className="object-address">{object.address}</p>
             <div className="object-progress"><div style={{ width: `${tasks.length ? accepted / tasks.length * 100 : 0}%` }} /></div>
             <div className="object-card-bottom"><span>Задач: <strong>{tasks.length}</strong></span><span>Принято: <strong>{accepted}</strong></span></div>
           </Link>
@@ -87,6 +89,7 @@ export function ObjectPage() {
   const navigate = useNavigate()
   const [editing, setEditing] = useState(false)
   const [creatingTask, setCreatingTask] = useState(false)
+  const [showArchived, setShowArchived] = useState(false)
   const [deleting, setDeleting] = useState(false)
   const [error, setError] = useState('')
   const resource = useResource(async () => {
@@ -102,26 +105,28 @@ export function ObjectPage() {
   }, [id])
 
   async function remove() {
-    if (!window.confirm('Удалить объект? Это действие нельзя отменить. Объект с задачами удалить не получится.')) return
+    if (!window.confirm('Архивировать объект? Сначала нужно архивировать все его задачи. История сохранится.')) return
     setDeleting(true); setError('')
     try {
-      const { data, error: deleteError } = await db().from('objects').delete().eq('id', id).select('id').single()
-      if (deleteError) throw deleteError
-      if (data) navigate('/objects', { replace: true })
+      const { error: archiveError } = await db().rpc('archive_object', { p_object_id: id })
+      if (archiveError) throw archiveError
+      navigate('/objects', { replace: true })
     } catch (e) { setError(errorMessage(e)) } finally { setDeleting(false) }
   }
   if (resource.loading) return <Loading />
   if (resource.error || !resource.data) return <LoadError message={resource.error} retry={resource.reload} />
   const { object, tasks, people } = resource.data
   if (!object) return <Unavailable />
+  const visibleTasks = tasks.filter(task => object.archived_at || showArchived ? Boolean(task.archived_at) : !task.archived_at)
   return <>
     <Link className="back-link" to="/objects">← Все объекты</Link>
-    <PageHeading eyebrow="КАРТОЧКА ОБЪЕКТА" title={object.name} description={object.address} action={manager && <div className="actions"><button className="secondary" onClick={() => setEditing(true)}>Редактировать</button><button className="danger-quiet" disabled={deleting} onClick={remove}>{deleting ? 'Удаление…' : 'Удалить'}</button></div>} />
+    <PageHeading eyebrow="КАРТОЧКА ОБЪЕКТА" title={object.name} description={object.address} action={manager && !object.archived_at && <div className="actions"><button className="secondary" onClick={() => setEditing(true)}>Редактировать</button><button className="danger-quiet" disabled={deleting} onClick={remove}>{deleting ? 'Архивирование…' : 'В архив'}</button></div>} />
     <ErrorNote message={error} />
-    {editing && <ObjectForm object={object} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); resource.reload() }} />}
-    <div className="section-heading"><h2>Задачи объекта <span className="count">{tasks.length}</span></h2>{manager && !creatingTask && <button onClick={() => setCreatingTask(true)}>+ Новая задача</button>}</div>
-    {creatingTask && <TaskForm objectId={id} onCancel={() => setCreatingTask(false)} onSaved={taskId => navigate(`/tasks/${taskId}`)} />}
-    <section className="panel list-panel"><TaskList tasks={tasks} names={new Map(people.map(p => [p.id, p.display_name]))} /></section>
+    {object.archived_at && <p className="muted">Объект в архиве с {formatDate(object.archived_at)}. Данные и история доступны только для просмотра.</p>}
+    {editing && !object.archived_at && <ObjectForm object={object} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); resource.reload() }} />}
+    <div className="section-heading"><h2>{object.archived_at || showArchived ? 'Архив задач' : 'Задачи объекта'} <span className="count">{visibleTasks.length}</span></h2>{manager && !object.archived_at && <div className="actions"><button className="secondary" aria-pressed={showArchived} onClick={() => setShowArchived(value => !value)}>{showArchived ? 'Активные задачи' : 'Архив задач'}</button>{!creatingTask && <button onClick={() => setCreatingTask(true)}>+ Новая задача</button>}</div>}</div>
+    {creatingTask && !object.archived_at && <TaskForm objectId={id} onCancel={() => setCreatingTask(false)} onSaved={taskId => navigate(`/tasks/${taskId}`)} />}
+    <section className="panel list-panel"><TaskList tasks={visibleTasks} names={new Map(people.map(p => [p.id, p.display_name]))} /></section>
   </>
 }
 
@@ -129,8 +134,8 @@ export function MyTasksPage() {
   const { profile } = useAuth()
   const resource = useResource(async () => {
     const [tasks, objects] = await Promise.all([
-      db().from('tasks').select('*').eq('assignee_id', profile!.id).order('created_at', { ascending: false }),
-      db().from('objects').select('*'),
+      db().from('tasks').select('*').is('archived_at', null).eq('assignee_id', profile!.id).order('created_at', { ascending: false }),
+      db().from('objects').select('*').is('archived_at', null),
     ])
     if (tasks.error) throw tasks.error
     if (objects.error) throw objects.error
@@ -180,11 +185,11 @@ export function TaskPage() {
     } catch (e) { setError(errorMessage(e)) } finally { setBusy(false) }
   }
   async function remove() {
-    if (!resource.data || !window.confirm('Удалить задачу вместе с историей? Это действие нельзя отменить.')) return
+    if (!resource.data || !window.confirm('Архивировать задачу? Она исчезнет из рабочих списков. Данные и история сохранятся в архиве.')) return
     setBusy(true); setError('')
     try {
-      const { error: deleteError } = await db().from('tasks').delete().eq('id', id).select('id').single()
-      if (deleteError) throw deleteError
+      const { error: archiveError } = await db().rpc('archive_task', { p_task_id: id })
+      if (archiveError) throw archiveError
       navigate(`/objects/${resource.data.task.object_id}`, { replace: true })
     } catch (e) { setError(errorMessage(e)) } finally { setBusy(false) }
   }
@@ -193,13 +198,14 @@ export function TaskPage() {
   if (!resource.data) return <Unavailable />
   const { task, object, people, history } = resource.data
   const names = new Map(people.map(p => [p.id, p.display_name]))
-  const canWork = !manager && task.assignee_id === profile?.id && (task.status === 'new' || task.status === 'revision')
-  const canSubmit = !manager && task.assignee_id === profile?.id && task.status === 'in_progress'
-  const canReview = manager && task.status === 'review'
+  const canWork = !task.archived_at && !manager && task.assignee_id === profile?.id && (task.status === 'new' || task.status === 'revision')
+  const canSubmit = !task.archived_at && !manager && task.assignee_id === profile?.id && task.status === 'in_progress'
+  const canReview = !task.archived_at && manager && task.status === 'review'
   return <>
     <Link className="back-link" to={`/objects/${object.id}`}>← {object.name}</Link>
-    <PageHeading eyebrow="КАРТОЧКА ЗАДАЧИ" title={task.title} action={manager && <div className="actions"><button className="secondary" disabled={busy} onClick={() => setEditing(true)}>Редактировать</button><button className="danger-quiet" disabled={busy} onClick={remove}>Удалить</button></div>} />
-    {editing && <TaskForm task={task} objectId={task.object_id} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); resource.reload() }} />}
+    <PageHeading eyebrow="КАРТОЧКА ЗАДАЧИ" title={task.title} action={manager && !task.archived_at && <div className="actions"><button className="secondary" disabled={busy} onClick={() => setEditing(true)}>Редактировать</button><button className="danger-quiet" disabled={busy} onClick={remove}>В архив</button></div>} />
+    {task.archived_at && <p className="muted">Задача в архиве с {formatDate(task.archived_at)}. Данные и история доступны только для просмотра.</p>}
+    {editing && !task.archived_at && <TaskForm task={task} objectId={task.object_id} onCancel={() => setEditing(false)} onSaved={() => { setEditing(false); resource.reload() }} />}
     <div className="detail-grid"><div>
       <section className="panel task-detail"><div className="detail-top"><h2>О задаче</h2><StatusBadge status={task.status} /></div>
         <p className="task-description">{task.description || 'Описание не добавлено.'}</p>

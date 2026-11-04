@@ -44,7 +44,7 @@ export function TaskList({ tasks, names, objectNames }: {
 }) {
   if (!tasks.length) return <EmptyState title="Задач пока нет">Здесь появятся назначенные задачи.</EmptyState>
   return <div className="task-list">{tasks.map(task => <Link key={task.id} className="task-row" to={`/tasks/${task.id}`}>
-    <div className="task-row-main"><strong>{task.title}</strong><span>{objectNames?.get(task.object_id) || names.get(task.assignee_id) || 'Исполнитель'}</span></div>
+    <div className="task-row-main"><strong>{task.title}{task.archived_at && ' · В архиве'}</strong><span>{objectNames?.get(task.object_id) || names.get(task.assignee_id) || 'Исполнитель'}</span></div>
     <StatusBadge status={task.status} /><span className="row-arrow" aria-hidden="true">→</span>
   </Link>)}</div>
 }

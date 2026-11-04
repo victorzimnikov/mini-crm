@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 
 test('demo seed creates all statuses with consistent history and does not duplicate data', async () => {
@@ -13,7 +13,10 @@ test('demo seed creates all statuses with consistent history and does not duplic
       create function auth.uid() returns uuid language sql stable as
         $$ select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid $$;
     `)
-    await db.exec(await readFile(new URL('../supabase/migrations/202611040001_initial.sql', import.meta.url), 'utf8'))
+    const migrations = new URL('../supabase/migrations/', import.meta.url)
+    for (const file of (await readdir(migrations)).filter(f => f.endsWith('.sql')).sort()) {
+      await db.exec(await readFile(new URL(file, migrations), 'utf8'))
+    }
     const seed = await readFile(new URL('../supabase/seed.sql', import.meta.url), 'utf8')
     await assert.rejects(db.exec(seed), /Сначала создайте/)
     await db.exec('rollback')

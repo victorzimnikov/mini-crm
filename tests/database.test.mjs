@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 import { PGlite } from '@electric-sql/pglite'
 
 // Real PostgreSQL in WASM. Only Supabase Auth's users table and auth.uid()
@@ -13,7 +13,7 @@ const ids = {
   bob: '00000000-0000-4000-8000-000000000004',
   noProfile: '00000000-0000-4000-8000-000000000005',
 }
-let objectId, privateObjectId, aliceTask, bobTask
+let objectId, privateObjectId, aliceTask, bobTask, tasksBeforeUpgrade, historyBeforeUpgrade
 
 async function as(user, fn) {
   await db.exec(`set role authenticated`)
@@ -54,8 +54,22 @@ before(async () => {
   privateObjectId = (await as('manager', () => db.query(`insert into public.objects(name,address) values ('Другой объект', 'Адрес 2') returning id`))).rows[0].id
   aliceTask = await insertTask('manager', 'alice')
   bobTask = await insertTask('manager2', 'bob', privateObjectId)
+  tasksBeforeUpgrade = (await db.query('select * from public.tasks order by id')).rows
+  historyBeforeUpgrade = (await db.query('select * from public.task_status_history order by id')).rows
+  // Upgrade a populated database, as on the existing Supabase deployment.
+  const migrations = new URL('../supabase/migrations/', import.meta.url)
+  for (const file of (await readdir(migrations)).filter(f => f.endsWith('.sql') && f !== '202611040001_initial.sql').sort()) {
+    await db.exec(await readFile(new URL(file, migrations), 'utf8'))
+  }
 })
 after(async () => { await db.close() })
+
+test('history-preservation migration upgrades existing tasks without changing their history', async () => {
+  const tasks = (await db.query('select * from public.tasks order by id')).rows
+  assert.ok(tasks.every(task => task.archived_at === null))
+  assert.deepEqual(tasks.map(({ archived_at, ...task }) => task), tasksBeforeUpgrade)
+  assert.deepEqual((await db.query('select * from public.task_status_history order by id')).rows, historyBeforeUpgrade)
+})
 
 test('RLS: executor sees only own tasks, objects and necessary profiles', async () => {
   await as('alice', async () => {
@@ -78,7 +92,7 @@ test('RLS: sharing an object never exposes another executor’s task', async () 
     assert.equal((await db.query('select * from public.tasks where object_id=$1', [objectId])).rows.length, 1)
     assert.equal((await db.query('select * from public.tasks where id=$1', [task])).rows.length, 0)
   })
-  await as('manager', () => db.query('delete from public.tasks where id=$1', [task]))
+  await as('manager', () => db.query('select public.archive_task($1)', [task]))
 })
 
 test('database rejects executor CRUD, self-promotion and forged system fields', async () => {
@@ -86,8 +100,8 @@ test('database rejects executor CRUD, self-promotion and forged system fields', 
   await as('alice', async () => {
     assert.equal((await db.query(`update public.tasks set title='Взлом' where id=$1 returning id`, [aliceTask])).rows.length, 0)
     assert.equal((await db.query(`update public.tasks set assignee_id=$1 where id=$2 returning id`, [ids.alice, bobTask])).rows.length, 0)
-    assert.equal((await db.query('delete from public.tasks where id=$1 returning id', [aliceTask])).rows.length, 0)
-    assert.equal((await db.query('delete from public.objects where id=$1 returning id', [objectId])).rows.length, 0)
+    await assert.rejects(db.query('delete from public.tasks where id=$1', [aliceTask]), /permission denied/)
+    await assert.rejects(db.query('delete from public.objects where id=$1', [objectId]), /permission denied/)
     await assert.rejects(db.query(`insert into public.objects(name,address) values ('Нет', 'Нет')`), /row-level security/)
     await assert.rejects(db.query(`update public.profiles set role='manager' where id=$1`, [ids.alice]), /permission denied/)
     await assert.rejects(db.query(`insert into public.profiles values ($1, 'Взлом', 'manager')`, [ids.noProfile]), /permission denied/)
@@ -150,7 +164,7 @@ test('all other status combinations are rejected for both roles', async () => {
       }
     }
   }
-  await as('manager', () => db.query('delete from public.tasks where id=$1', [task]))
+  await as('manager', () => db.query('select public.archive_task($1)', [task]))
 })
 
 test('history is read-only through client grants, including for managers', async () => {
@@ -176,13 +190,71 @@ test('manager edits normal fields; reassignment revokes previous executor access
   await assert.rejects(move('alice', aliceTask, 'in_progress'), /не найдена или недоступна/)
 })
 
-test('object deletion is restricted; deleting a task cascades its history', async () => {
+test('archiving tasks and their object keeps their complete history readable to managers', async () => {
+  const before = (await db.query('select * from public.task_status_history where task_id=$1 order by created_at', [aliceTask])).rows
   await as('manager', async () => {
-    await assert.rejects(db.query('delete from public.objects where id=$1', [objectId]), /foreign key constraint/)
-    await db.query('delete from public.tasks where id=$1', [aliceTask])
-    assert.equal((await db.query('select * from public.task_status_history where task_id=$1', [aliceTask])).rows.length, 0)
-    assert.equal((await db.query('delete from public.objects where id=$1 returning id', [objectId])).rows.length, 1)
+    await assert.rejects(db.query('delete from public.tasks where id=$1', [aliceTask]), /permission denied/)
+    await assert.rejects(db.query('delete from public.objects where id=$1', [objectId]), /permission denied/)
+    await assert.rejects(db.query('select public.archive_object($1)', [objectId]), /Сначала архивируйте/)
+    await db.query('select public.archive_task($1)', [aliceTask])
+    await db.query('select public.archive_object($1)', [objectId])
+    assert.equal((await db.query('select id from public.tasks where object_id=$1 and archived_at is null', [objectId])).rows.length, 0)
+    assert.equal((await db.query('select id from public.objects where id=$1 and archived_at is null', [objectId])).rows.length, 0)
   })
+  await as('manager2', async () => {
+    assert.ok((await db.query('select archived_at from public.tasks where id=$1', [aliceTask])).rows[0].archived_at)
+    assert.ok((await db.query('select archived_at from public.objects where id=$1', [objectId])).rows[0].archived_at)
+    assert.deepEqual((await db.query('select * from public.task_status_history where task_id=$1 order by created_at', [aliceTask])).rows, before)
+    for (const verb of ["update public.task_status_history set comment='Подмена'", 'delete from public.task_status_history']) {
+      await assert.rejects(db.query(`${verb} where task_id=$1`, [aliceTask]), /permission denied/)
+    }
+    await assert.rejects(db.query('select public.archive_task($1)', [aliceTask]), /уже в архиве/)
+    await assert.rejects(db.query('select public.archive_object($1)', [objectId]), /уже в архиве/)
+  })
+  await as('bob', async () => {
+    for (const [table, column] of [['tasks', 'id'], ['task_status_history', 'task_id']]) {
+      assert.equal((await db.query(`select * from public.${table} where ${column}=$1`, [aliceTask])).rows.length, 0)
+    }
+    assert.equal((await db.query('select * from public.objects where id=$1', [objectId])).rows.length, 0)
+  })
+  // Even a trusted physical task deletion cannot cascade away its audit trail.
+  await assert.rejects(db.query('delete from public.tasks where id=$1', [aliceTask]), /foreign key constraint/)
+})
+
+test('archive RPCs enforce roles and archived data cannot be edited, reopened or moved', async () => {
+  const object = (await as('manager', () => db.query("insert into public.objects(name,address) values ('Архив', 'Адрес') returning id"))).rows[0].id
+  const task = await insertTask('manager', 'alice', object)
+  await move('alice', task, 'in_progress')
+  await move('alice', task, 'review')
+  for (const user of ['alice', 'bob', 'noProfile', '']) {
+    await as(user, async () => {
+      await assert.rejects(db.query('select public.archive_task($1)', [task]), /только постановщик/)
+      await assert.rejects(db.query('select public.archive_object($1)', [object]), /только постановщик/)
+    })
+  }
+  await as('manager', () => db.query('select public.archive_task($1)', [task]))
+  const before = (await db.query('select * from public.task_status_history where task_id=$1 order by created_at', [task])).rows
+  // The parent disappears for the executor as soon as its last active task is archived.
+  await as('alice', async () => {
+    assert.equal((await db.query('select * from public.objects where id=$1', [object])).rows.length, 0)
+    assert.equal((await db.query('select * from public.tasks where id=$1', [task])).rows.length, 0)
+    assert.equal((await db.query('select * from public.task_status_history where task_id=$1', [task])).rows.length, 0)
+  })
+  await assert.rejects(move('manager', task, 'accepted'), /не найдена или недоступна/)
+  await assert.rejects(move('alice', task, 'in_progress'), /не найдена или недоступна/)
+  await as('manager', async () => {
+    assert.equal((await db.query("update public.tasks set title='Подмена', assignee_id=$1, object_id=$2 where id=$3 returning id", [ids.bob, privateObjectId, task])).rows.length, 0)
+    await assert.rejects(db.query('update public.tasks set archived_at=null where id=$1', [task]), /permission denied/)
+    await db.query('select public.archive_object($1)', [object])
+    assert.equal((await db.query("update public.objects set name='Подмена' where id=$1 returning id", [object])).rows.length, 0)
+    await assert.rejects(db.query('update public.objects set archived_at=null where id=$1', [object]), /permission denied/)
+    await assert.rejects(db.query("insert into public.tasks(title, object_id, assignee_id) values ('Нет', $1, $2)", [object, ids.alice]), /Объект не найден или находится в архиве/)
+    await assert.rejects(db.query('update public.tasks set object_id=$1 where id=$2', [object, bobTask]), /Объект не найден или находится в архиве/)
+    for (const table of ['tasks', 'objects']) {
+      await assert.rejects(db.query(`truncate public.${table} cascade`), /permission denied/)
+    }
+  })
+  assert.deepEqual((await db.query('select * from public.task_status_history where task_id=$1 order by created_at', [task])).rows, before)
 })
 
 test('anonymous callers have no data access and cannot call RPC or helpers', async () => {
@@ -193,6 +265,8 @@ test('anonymous callers have no data access and cannot call RPC or helpers', asy
     }
     await assert.rejects(db.query(`select public.change_task_status($1,'in_progress',null)`, [bobTask]), /permission denied/)
     await assert.rejects(db.query('select private.is_manager()'), /permission denied/)
+    await assert.rejects(db.query('select public.archive_task($1)', [bobTask]), /permission denied/)
+    await assert.rejects(db.query('select public.archive_object($1)', [privateObjectId]), /permission denied/)
   } finally { await db.exec('reset role') }
   await assert.rejects(move('', bobTask, 'in_progress'), /Требуется вход/)
 })
